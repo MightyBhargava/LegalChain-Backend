@@ -2,81 +2,103 @@
 header("Content-Type: application/json");
 require "db.php";
 
-// ---------- REQUIRED ----------
+/* ================= ONLY POST ================= */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    echo json_encode(["status" => "error", "message" => "Invalid request"]);
+    echo json_encode([
+        "status" => "error",
+        "message" => "Invalid request method"
+    ]);
     exit;
 }
 
-// ---------- FORM DATA ----------
-$role      = $_POST['role'] ?? '';
-$full_name = $_POST['full_name'] ?? '';
-$email     = $_POST['email'] ?? '';
-$password  = $_POST['password'] ?? '';
+/* ================= INPUT ================= */
+$email    = trim($_POST['email'] ?? '');
+$otp      = trim($_POST['otp'] ?? '');
+$password = trim($_POST['password'] ?? '');
 
-$bar_id    = $_POST['bar_id'] ?? null;
-$country   = $_POST['country'] ?? null;
-$state     = $_POST['state'] ?? null;
-$district  = $_POST['district'] ?? null;
-$address   = $_POST['address'] ?? null;
-
-// ---------- PASSWORD HASH ----------
-$hashedPassword = password_hash($password, PASSWORD_BCRYPT);
-
-// ---------- FILE UPLOAD ----------
-$documentPath = null;
-
-if ($role === "lawyer" && isset($_FILES['document'])) {
-
-    $uploadDir = __DIR__ . "/uploads/";
-
-    // create uploads folder if not exists
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0777, true);
-    }
-
-    $fileName = time() . "_" . basename($_FILES['document']['name']);
-    $targetFile = $uploadDir . $fileName;
-
-    if (move_uploaded_file($_FILES['document']['tmp_name'], $targetFile)) {
-        $documentPath = "uploads/" . $fileName;
-    } else {
-        echo json_encode([
-            "status" => "error",
-            "message" => "File upload failed"
-        ]);
-        exit;
-    }
-}
-
-// ---------- INSERT INTO DATABASE ----------
-$sql = "INSERT INTO users 
-(role, full_name, email, password, bar_id, country, state, district, address, document)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-
-$stmt = $conn->prepare($sql);
-$stmt->bind_param(
-    "ssssssssss",
-    $role,
-    $full_name,
-    $email,
-    $hashedPassword,
-    $bar_id,
-    $country,
-    $state,
-    $district,
-    $address,
-    $document
-);
-
-if ($stmt->execute()) {
-    echo json_encode([
-        "status" => "success",
-        "message" => "Registration successful"
-    ]);
-} else {
+/* ================= VALIDATION ================= */
+if ($email === '' || $otp === '' || $password === '') {
     echo json_encode([
         "status" => "error",
-        "message" => "Database insert failed"
+        "message" => "Email, OTP and password required"
     ]);
+    exit;
 }
+
+if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Invalid email"
+    ]);
+    exit;
+}
+
+if (strlen($password) < 6) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Password must be at least 6 characters"
+    ]);
+    exit;
+}
+
+/* ================= FETCH USER ================= */
+$stmt = $conn->prepare(
+    "SELECT id, reset_otp, otp_expiry 
+     FROM users 
+     WHERE email = ?"
+);
+$stmt->bind_param("s", $email);
+$stmt->execute();
+$res = $stmt->get_result();
+
+if ($res->num_rows !== 1) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Email not found"
+    ]);
+    exit;
+}
+
+$user = $res->fetch_assoc();
+
+/* ================= VERIFY OTP ================= */
+if ($user['reset_otp'] !== $otp) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Invalid OTP"
+    ]);
+    exit;
+}
+
+/* ================= CHECK EXPIRY ================= */
+if (strtotime($user['otp_expiry']) < time()) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "OTP expired"
+    ]);
+    exit;
+}
+
+/* ================= UPDATE PASSWORD ================= */
+$hashedPassword = password_hash($password, PASSWORD_BCRYPT);
+
+$update = $conn->prepare(
+    "UPDATE users 
+     SET password = ?, reset_otp = NULL, otp_expiry = NULL 
+     WHERE id = ?"
+);
+$update->bind_param("si", $hashedPassword, $user['id']);
+
+if (!$update->execute()) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Password update failed"
+    ]);
+    exit;
+}
+
+/* ================= SUCCESS ================= */
+echo json_encode([
+    "status" => "success",
+    "message" => "Password reset successful. Please login."
+]);

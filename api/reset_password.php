@@ -3,7 +3,7 @@ header("Content-Type: application/json");
 date_default_timezone_set("Asia/Kolkata");
 require "db.php";
 
-/* ONLY POST */
+/* ================= ONLY POST ================= */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode([
         "status" => "error",
@@ -12,15 +12,25 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-/* INPUTS */
-$token    = trim($_POST['token'] ?? '');
+/* ================= INPUTS ================= */
+$type     = $_POST['type'] ?? '';     // email | phone
+$value    = trim($_POST['value'] ?? '');
+$otp      = trim($_POST['otp'] ?? '');
 $password = trim($_POST['password'] ?? '');
 
-/* VALIDATION */
-if ($token === '' || $password === '') {
+/* ================= VALIDATION ================= */
+if ($type === '' || $value === '' || $otp === '' || $password === '') {
     echo json_encode([
         "status" => "error",
-        "message" => "Token and password required"
+        "message" => "Type, value, OTP and password required"
+    ]);
+    exit;
+}
+
+if (!in_array($type, ['email', 'phone'])) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Invalid type"
     ]);
     exit;
 }
@@ -33,43 +43,54 @@ if (strlen($password) < 6) {
     exit;
 }
 
-/* 1️⃣ CHECK TOKEN */
-$check = $conn->prepare(
-    "SELECT id, reset_token_expiry 
+/* ================= FETCH USER ================= */
+$field = ($type === "phone") ? "phone" : "email";
+
+$stmt = $conn->prepare(
+    "SELECT id, reset_otp, otp_expiry 
      FROM users 
-     WHERE reset_token = ?"
+     WHERE $field = ?"
 );
-$check->bind_param("s", $token);
-$check->execute();
-$res = $check->get_result();
+$stmt->bind_param("s", $value);
+$stmt->execute();
+$res = $stmt->get_result();
 
 if ($res->num_rows === 0) {
     echo json_encode([
         "status" => "error",
-        "message" => "Invalid or used token"
+        "message" => ucfirst($type)." not registered"
     ]);
     exit;
 }
 
 $user = $res->fetch_assoc();
 
-/* 2️⃣ CHECK EXPIRY */
-if (strtotime($user['reset_token_expiry']) < time()) {
+/* ================= VERIFY OTP ================= */
+if ($user['reset_otp'] !== $otp) {
     echo json_encode([
         "status" => "error",
-        "message" => "Reset link expired"
+        "message" => "Invalid OTP"
     ]);
     exit;
 }
 
-/* 3️⃣ UPDATE PASSWORD */
+/* ================= CHECK EXPIRY ================= */
+if (strtotime($user['otp_expiry']) < time()) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "OTP expired"
+    ]);
+    exit;
+}
+
+/* ================= UPDATE PASSWORD ================= */
 $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
 
 $update = $conn->prepare(
     "UPDATE users 
      SET password = ?, 
-         reset_token = NULL, 
-         reset_token_expiry = NULL 
+         reset_otp = NULL, 
+         otp_expiry = NULL 
      WHERE id = ?"
 );
 $update->bind_param("si", $hashedPassword, $user['id']);
@@ -82,7 +103,7 @@ if (!$update->execute()) {
     exit;
 }
 
-/* SUCCESS */
+/* ================= SUCCESS ================= */
 echo json_encode([
     "status" => "success",
     "message" => "Password reset successful. Please login."
