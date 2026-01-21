@@ -12,15 +12,31 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 /* ================= INPUT ================= */
-$email    = trim($_POST['email'] ?? '');
-$otp      = trim($_POST['otp'] ?? '');
-$password = trim($_POST['password'] ?? '');
+$role       = strtolower(trim($_POST['role'] ?? ''));
+$full_name = trim($_POST['full_name'] ?? '');
+$email     = trim($_POST['email'] ?? '');
+$phone     = trim($_POST['phone'] ?? '');
+$password  = trim($_POST['password'] ?? '');
 
-/* ================= VALIDATION ================= */
-if ($email === '' || $otp === '' || $password === '') {
+$bar_id   = trim($_POST['bar_id'] ?? '');
+$country  = trim($_POST['country'] ?? '');
+$state    = trim($_POST['state'] ?? '');
+$district = trim($_POST['district'] ?? '');
+$address  = trim($_POST['address'] ?? '');
+
+/* ================= BASIC VALIDATION ================= */
+if ($role === '' || $full_name === '' || $email === '' || $phone === '' || $password === '') {
     echo json_encode([
         "status" => "error",
-        "message" => "Email, OTP and password required"
+        "message" => "All required fields must be filled"
+    ]);
+    exit;
+}
+
+if (!in_array($role, ["client", "lawyer"])) {
+    echo json_encode([
+        "status" => "error",
+        "message" => "Role must be client or lawyer"
     ]);
     exit;
 }
@@ -28,7 +44,7 @@ if ($email === '' || $otp === '' || $password === '') {
 if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
     echo json_encode([
         "status" => "error",
-        "message" => "Invalid email"
+        "message" => "Invalid email format"
     ]);
     exit;
 }
@@ -41,64 +57,120 @@ if (strlen($password) < 6) {
     exit;
 }
 
-/* ================= FETCH USER ================= */
-$stmt = $conn->prepare(
-    "SELECT id, reset_otp, otp_expiry 
-     FROM users 
-     WHERE email = ?"
-);
-$stmt->bind_param("s", $email);
-$stmt->execute();
-$res = $stmt->get_result();
+/* ================= LAWYER VALIDATION ================= */
+if ($role === "lawyer") {
+    if ($bar_id === '' || $country === '' || $state === '' || $district === '' || $address === '') {
+        echo json_encode([
+            "status" => "error",
+            "message" => "All professional fields are required for lawyer"
+        ]);
+        exit;
+    }
 
-if ($res->num_rows !== 1) {
+    if (!isset($_FILES['document'])) {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Document upload required for lawyer"
+        ]);
+        exit;
+    }
+}
+
+/* ================= CHECK DUPLICATE ================= */
+$check = $conn->prepare("SELECT id FROM users WHERE email = ? OR phone = ?");
+$check->bind_param("ss", $email, $phone);
+$check->execute();
+$res = $check->get_result();
+
+if ($res->num_rows > 0) {
     echo json_encode([
         "status" => "error",
-        "message" => "Email not found"
+        "message" => "Email or phone already registered"
     ]);
     exit;
 }
 
-$user = $res->fetch_assoc();
+/* ================= FILE UPLOAD ================= */
+$documentPath = null;
 
-/* ================= VERIFY OTP ================= */
-if ($user['reset_otp'] !== $otp) {
-    echo json_encode([
-        "status" => "error",
-        "message" => "Invalid OTP"
-    ]);
-    exit;
+if ($role === "lawyer") {
+
+    $allowedTypes = ['pdf', 'jpg', 'jpeg', 'png'];
+    $fileName = $_FILES['document']['name'];
+    $fileTmp  = $_FILES['document']['tmp_name'];
+    $fileSize = $_FILES['document']['size'];
+
+    $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+
+    if (!in_array($ext, $allowedTypes)) {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Only PDF, JPG, JPEG, PNG allowed"
+        ]);
+        exit;
+    }
+
+    if ($fileSize > 5 * 1024 * 1024) {
+        echo json_encode([
+            "status" => "error",
+            "message" => "File must be less than 5MB"
+        ]);
+        exit;
+    }
+
+    $newName = uniqid("doc_") . "." . $ext;
+    $uploadDir = "uploads/";
+
+    if (!is_dir($uploadDir)) {
+        mkdir($uploadDir, 0777, true);
+    }
+
+    $documentPath = $uploadDir . $newName;
+
+    if (!move_uploaded_file($fileTmp, $documentPath)) {
+        echo json_encode([
+            "status" => "error",
+            "message" => "Failed to upload document"
+        ]);
+        exit;
+    }
 }
 
-/* ================= CHECK EXPIRY ================= */
-if (strtotime($user['otp_expiry']) < time()) {
-    echo json_encode([
-        "status" => "error",
-        "message" => "OTP expired"
-    ]);
-    exit;
-}
-
-/* ================= UPDATE PASSWORD ================= */
+/* ================= INSERT ================= */
 $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
 
-$update = $conn->prepare(
-    "UPDATE users 
-     SET password = ?, reset_otp = NULL, otp_expiry = NULL 
-     WHERE id = ?"
+$stmt = $conn->prepare(
+    "INSERT INTO users 
+    (role, full_name, email, phone, password, bar_id, country, state, district, address, document) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 );
-$update->bind_param("si", $hashedPassword, $user['id']);
 
-if (!$update->execute()) {
+$stmt->bind_param(
+    "sssssssssss",
+    $role,
+    $full_name,
+    $email,
+    $phone,
+    $hashedPassword,
+    $bar_id,
+    $country,
+    $state,
+    $district,
+    $address,
+    $documentPath
+);
+
+if ($stmt->execute()) {
+    echo json_encode([
+        "status" => "success",
+        "message" => $role === "lawyer"
+            ? "Registration successful. Verification pending."
+            : "Registration successful"
+    ]);
+} else {
     echo json_encode([
         "status" => "error",
-        "message" => "Password update failed"
+        "message" => "Database insert failed"
     ]);
-    exit;
 }
-
-/* ================= SUCCESS ================= */
-echo json_encode([
-    "status" => "success",
-    "message" => "Password reset successful. Please login."
-]);
+?>
